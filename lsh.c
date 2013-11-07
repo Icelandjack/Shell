@@ -70,7 +70,7 @@ int main(void)
         n = parse(line, &cmd);
         PrintCommand(n, &cmd);
 	
-	printf("Executing command %s!\n", cmd.pgm->pgmlist[0]);
+	printf("Executing cool command %s!\n", cmd.pgm->pgmlist[0]);
 
 	if ( (pid = fork()) < 0) {
 	  perror("pid");
