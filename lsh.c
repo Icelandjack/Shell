@@ -1,5 +1,5 @@
 /* 
- * Main source code file for lsh shell program
+ * Main source code file for lsh shell program.
  *
  * You are free to add functions to this file.
  * If you want to add functions in a separate file 
