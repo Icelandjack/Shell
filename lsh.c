@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 #include "parse.h"
@@ -30,8 +31,8 @@
  */
 
 int  NumberOfCommands(Command);
-int  StartPipeline(Pgm *);
-int  RunPipeline(Pgm *, int, int);
+int  StartPipeline(Command);
+int  RunPipeline(Pgm *, Command, int, int);
 void PrintCommand(int, Command *);
 void PrintPgm(Pgm *);
 void stripwhite(char *);
@@ -49,7 +50,7 @@ int main(void)
 {
   Command cmd;
   int n;
-  int num;
+  /* int num; */
   
   while (!done) {
 
@@ -76,9 +77,9 @@ int main(void)
 	
 	/* printf("Executing cool command %s!\n", cmd.pgm->pgmlist[0]); */
 
-	StartPipeline(cmd.pgm);
-	num = NumberOfCommands(cmd);
-	printf("Number of commands: %d\n", num);
+	StartPipeline(cmd);
+	/* num = NumberOfCommands(cmd); */
+	/* printf("Number of commands: %d\n", num); */
 
       }
     }
@@ -91,15 +92,18 @@ int main(void)
 }
 
 int 
-StartPipeline(Pgm *p)
+StartPipeline(Command cmd)
 {
   pid_t pid;
   if ( (pid = fork()) == 0) {
-    RunPipeline(p, 0, -1);
+    RunPipeline(cmd.pgm, cmd, 0, -1);
     exit(-1);    
   }
   else {
-    waitpid(pid, NULL, 0);
+
+    /* We don't wait for backgrounded commands */
+    if (!cmd.bakground)
+      waitpid(pid, NULL, 0);
   }
   return 0;
 }
@@ -117,61 +121,78 @@ StartPipeline(Pgm *p)
  *
  */
 int
-RunPipeline(Pgm *p, int cmdNum, int pipeWrite)
+RunPipeline(Pgm *p, Command cmd, int cmdNum, int pipeWrite)
 {
   pid_t  pid;
   char **program;
   int    fd[2];
   int    firstCmd;
   int    lastCmd;
+  int    stdinRedirect;
+  int    stdinFile;
+  int    stdoutRedirect;
+  int    stdoutFile;
 
-  firstCmd = p->next == NULL;
-  lastCmd  = cmdNum  == 0;
+  firstCmd       = p->next == NULL;
+  lastCmd        = cmdNum  == 0;
+  stdinRedirect  = cmd.rstdin  && firstCmd;
+  stdinFile      = -1;
+  stdoutRedirect = cmd.rstdout && lastCmd;
+  stdoutFile     = -1;
+  
+  program  = p->pgmlist;
   
   /* We don't create a new pipe for the first command. */
   if (!firstCmd) {
-    printf("+ CREATE PIPE\n");
     pipe(fd);
-    RunPipeline(p->next, cmdNum + 1, fd[0]);
+    RunPipeline(p->next, cmd, cmdNum + 1, fd[1]);
   }
 
-  program = p->pgmlist;
+  /* Redirect standard input by replacing  */
+  if (stdinRedirect) {
+    stdinFile = open(cmd.rstdin, O_RDONLY);
+    dup2(stdinFile, 0);
+  }
+
+  if (stdoutRedirect) {
+    stdoutFile = open(cmd.rstdout, O_WRONLY | O_CREAT, 0666);
+    dup2(stdoutFile, 1);
+  }
 
   /* Last command is not forked */
   if (lastCmd) {
-
     /* More than a single command! */
     if (!firstCmd) {
-      printf("+ LAST: DUPLICATE FD[0] TO 0 (READ, STDIN)\n");
+      close(fd[1]);
       dup2(fd[0],  0);
     }
     
-    printf("+ LAST \"%s\"\n", p->pgmlist[0]);
     execvp(program[0], program);
-    exit(EXIT_SUCCESS);
+    exit(EXIT_FAILURE);
   }
 
   if ( (pid = fork()) == 0) {
     if (firstCmd) {
-      printf("+ FIRST: DUPLICATE pipeWrite TO 1 (WRITE, STDOUT)\n");
       dup2(pipeWrite, 1);
-      printf("+ %s \"%s\"\n", "FIRST", program[0]);
-      execvp(program[0], p->pgmlist);
-      exit(0);
+      execvp(program[0], program);
+      exit(EXIT_FAILURE);
     }
     /* Middle commands (neither first nor last) */
     else {
-      printf("+ MEDIA: CLOSE fd[1]\n");
+      
       close(fd[1]);
-      printf("+ MEDIA: DUPLICATE fd[0] TO 0 (READ, STDIN)\n");
-      dup2(fd[0],  0);
-      printf("+ MEDIA: DUPLICATE pipeWrite TO 1 (WRITE, STDOUT)\n");
+      dup2(fd[0], 0);
       dup2(pipeWrite, 1);
-      printf("+ %s \"%s\"\n", "EXEC", program[0]);
-      execvp(program[0], p->pgmlist);
-      exit(0);
+
+      execvp(program[0], program);
+      exit(EXIT_FAILURE);
     }
   }
+
+  if (stdinRedirect)  { close(stdinFile);  }
+  if (stdoutRedirect) { close(stdoutFile); }
+  
+  close(pipeWrite);
   
   return 1;
 }
@@ -257,6 +278,7 @@ PrintPgm (Pgm *p)
     printf("    [");
     while (*pl) {
       printf("%s ", *pl++);
+      putchar(',');
     }
     printf("]\n");
   }
