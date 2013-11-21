@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <sys/wait.h>
 #include <readline/readline.h>
 #include <readline/history.h>
 #include "parse.h"
@@ -28,6 +29,9 @@
  * Function declarations
  */
 
+int  NumberOfCommands(Command);
+int  StartPipeline(Pgm *);
+int  RunPipeline(Pgm *, int, int);
 void PrintCommand(int, Command *);
 void PrintPgm(Pgm *);
 void stripwhite(char *);
@@ -45,8 +49,8 @@ int main(void)
 {
   Command cmd;
   int n;
-  pid_t pid;
-
+  int num;
+  
   while (!done) {
 
     char *line;
@@ -64,31 +68,19 @@ int main(void)
        */
       stripwhite(line);
 
-      if(*line) {
+      if (*line) {
         add_history(line);
         /* execute it */
         n = parse(line, &cmd);
-        PrintCommand(n, &cmd);
+        /* PrintCommand(n, &cmd); */
 	
-	printf("Executing cool command %s!\n", cmd.pgm->pgmlist[0]);
+	/* printf("Executing cool command %s!\n", cmd.pgm->pgmlist[0]); */
 
-	if ( (pid = fork()) < 0) {
-	  perror("pid");
-	  exit(EXIT_SUCCESS);
-	}
+	StartPipeline(cmd.pgm);
+	num = NumberOfCommands(cmd);
+	printf("Number of commands: %d\n", num);
 
-	/* In the CHILD process. */
-	else if (pid == 0) {
-	  execl("/bin/sleep", "/bin/sleep", "5", (char *) NULL);
-	}
-	/* In the PARENT process. */
-	else {
-	  printf("Waiting for child...\n");
-	  wait(pid);
-	  printf("Child has finished executing...\n");
-	}
       }
-
     }
     
     if(line) {
@@ -96,6 +88,135 @@ int main(void)
     }
   }
   return 0;
+}
+
+int 
+StartPipeline(Pgm *p)
+{
+  pid_t pid;
+  if ( (pid = fork()) == 0) {
+    RunPipeline(p, 0, -1);
+    exit(-1);    
+  }
+  else {
+    waitpid(pid, NULL, 0);
+  }
+  return 0;
+}
+
+
+/*
+ * Name: RunPipeline
+ *
+ * Description: An auxilliary function to `StartPipeline()', takes care
+ *   of actually running the pipeline.
+ *
+ * Arguments:
+ *   p      --- The pipeline.
+ *   cmdNum --- The number of the command starting from last = 0, penultimate = 1, …
+ *
+ */
+int
+RunPipeline(Pgm *p, int cmdNum, int pipeWrite)
+{
+  pid_t  pid;
+  char **program;
+  int    fd[2];
+  int    firstCmd;
+  int    lastCmd;
+
+  firstCmd = p->next == NULL;
+  lastCmd  = cmdNum  == 0;
+  
+  /* We don't create a new pipe for the first command. */
+  if (!firstCmd) {
+    printf("+ CREATE PIPE\n");
+    pipe(fd);
+    RunPipeline(p->next, cmdNum + 1, fd[0]);
+  }
+
+  program = p->pgmlist;
+
+  /* Last command is not forked */
+  if (lastCmd) {
+
+    /* More than a single command! */
+    if (!firstCmd) {
+      printf("+ LAST: DUPLICATE FD[0] TO 0 (READ, STDIN)\n");
+      dup2(fd[0],  0);
+    }
+    
+    printf("+ LAST \"%s\"\n", p->pgmlist[0]);
+    execvp(program[0], program);
+    exit(EXIT_SUCCESS);
+  }
+
+  if ( (pid = fork()) == 0) {
+    if (firstCmd) {
+      printf("+ FIRST: DUPLICATE pipeWrite TO 1 (WRITE, STDOUT)\n");
+      dup2(pipeWrite, 1);
+      printf("+ %s \"%s\"\n", "FIRST", program[0]);
+      execvp(program[0], p->pgmlist);
+      exit(0);
+    }
+    /* Middle commands (neither first nor last) */
+    else {
+      printf("+ MEDIA: CLOSE fd[1]\n");
+      close(fd[1]);
+      printf("+ MEDIA: DUPLICATE fd[0] TO 0 (READ, STDIN)\n");
+      dup2(fd[0],  0);
+      printf("+ MEDIA: DUPLICATE pipeWrite TO 1 (WRITE, STDOUT)\n");
+      dup2(pipeWrite, 1);
+      printf("+ %s \"%s\"\n", "EXEC", program[0]);
+      execvp(program[0], p->pgmlist);
+      exit(0);
+    }
+  }
+  
+  return 1;
+}
+
+/* void */
+/* RunPipeline(Pgm *p, int n, int pipefd[2]) */
+/* { */
+/*   if (p == NULL) { */
+/*     return; */
+/*   } */
+
+/*   pid_t pid; */
+
+/*   char **pl = p->pgmlist; */
+/*   RunPipeline(p->next, n + 1, NULL); */
+/*   printf("Running: %s\n", pl[0]); */
+
+/*   if ( (pid = fork()) < 0) { */
+/*     perror("fork"); */
+/*     exit(EXIT_FAILURE); */
+/*   } */
+
+/*   else if (pid == 0) {		/\* child *\/ */
+/*     execvp(pl[0], pl); */
+/*     perror("execlp"); */
+/*     exit(EXIT_FAILURE); */
+/*   } */
+
+/*   else {			/\* parent *\/ */
+/*     wait(NULL); */
+/*   } */
+
+/*   return; */
+/* } */
+
+int
+NumberOfCommands(Command cmd)
+{
+  int total = 0;
+  Pgm *inter;
+  for (inter = cmd.pgm;
+       inter != NULL;
+       inter = inter->next) 
+    total++;
+  return total;
 }
 
 /*

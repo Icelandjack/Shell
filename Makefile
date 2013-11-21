@@ -7,10 +7,10 @@ BIN=	lsh
 SRCS=	parse.c lsh.c
 OBJS=	parse.o lsh.o
 
-CC=	gcc
+CC=	clang
 CFLAGS= -g 
 ## Turn on this for more warnings:
-#CFLAGS= -g -Wall -pedantic
+CFLAGS= -g -Wall -pedantic
 LIBS= -lreadline -ltermcap
 
 .SUFFIXES: .c .o
