@@ -95,9 +95,20 @@ int
 StartPipeline(Command cmd)
 {
   pid_t pid;
+
+  /* `exit' and `cd' must be shell-builtins. */
+  if (strcmp(cmd.pgm->pgmlist[0], "exit") == 0) { done = 1; }
+  if (strcmp(cmd.pgm->pgmlist[0], "cd")   == 0) {
+    if (chdir(cmd.pgm->pgmlist[1] == NULL
+	      ? getenv("HOME")
+	      : cmd.pgm->pgmlist[1]) < 0) {
+      perror("cd");
+    }
+  }
+  
   if ( (pid = fork()) == 0) {
     RunPipeline(cmd.pgm, cmd, 0, -1);
-    exit(-1);    
+    exit(-1);
   }
   else {
 
@@ -136,8 +147,8 @@ RunPipeline(Pgm *p, Command cmd, int cmdNum, int pipeWrite)
   firstCmd       = p->next == NULL;
   lastCmd        = cmdNum  == 0;
   stdinRedirect  = cmd.rstdin  && firstCmd;
-  stdinFile      = -1;
   stdoutRedirect = cmd.rstdout && lastCmd;
+  stdinFile      = -1;
   stdoutFile     = -1;
   
   program  = p->pgmlist;
@@ -148,14 +159,15 @@ RunPipeline(Pgm *p, Command cmd, int cmdNum, int pipeWrite)
     RunPipeline(p->next, cmd, cmdNum + 1, fd[1]);
   }
 
-  /* Redirect standard input by replacing  */
+  /* Redirect standard input by replacing STDIN of first command with a file  */
   if (stdinRedirect) {
     stdinFile = open(cmd.rstdin, O_RDONLY);
     dup2(stdinFile, 0);
   }
 
+  /* Redirect standard output by replacing STDOUT of last command with a file  */
   if (stdoutRedirect) {
-    stdoutFile = open(cmd.rstdout, O_WRONLY | O_CREAT, 0666);
+    stdoutFile = open(cmd.rstdout, O_WRONLY|O_CREAT, 0666);
     dup2(stdoutFile, 1);
   }
 
