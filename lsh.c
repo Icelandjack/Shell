@@ -30,15 +30,17 @@
  * Function declarations
  */
 
-int  NumberOfCommands(Command);
-int  StartPipeline(Command);
-int  RunPipeline(Pgm *, Command, int, int);
-void PrintCommand(int, Command *);
-void PrintPgm(Pgm *);
+void StartPipeline(Command);
+void RunPipeline(Pgm *, Command, int, int);
 void stripwhite(char *);
 
 /* When non-zero, this global means the user is done using this program. */
 int done = 0;
+
+static void catch_function(int signo) {
+  putchar('\n');
+  return;
+}
 
 /*
  * Name: main
@@ -51,6 +53,11 @@ int main(void)
   Command cmd;
   int n;
   /* int num; */
+
+  if (signal(SIGINT, catch_function) == SIG_ERR) {
+    perror("signal");
+    exit(EXIT_FAILURE);
+  }
   
   while (!done) {
 
@@ -71,16 +78,11 @@ int main(void)
 
       if (*line) {
         add_history(line);
+	
         /* execute it */
         n = parse(line, &cmd);
-        /* PrintCommand(n, &cmd); */
-	
-	/* printf("Executing cool command %s!\n", cmd.pgm->pgmlist[0]); */
 
 	StartPipeline(cmd);
-	/* num = NumberOfCommands(cmd); */
-	/* printf("Number of commands: %d\n", num); */
-
       }
     }
     
@@ -91,7 +93,15 @@ int main(void)
   return 0;
 }
 
-int 
+/*
+ * Name: StartPipeline
+ *
+ * Description: Runs command.
+ *
+ * Arguments:
+ *   cmd    --- The command to run.
+ */
+void 
 StartPipeline(Command cmd)
 {
   pid_t pid;
@@ -104,19 +114,26 @@ StartPipeline(Command cmd)
 	      : cmd.pgm->pgmlist[1]) < 0) {
       perror("cd");
     }
+    return;
   }
-  
+
+  /*
+    We run the entire pipeline as a single child process which then
+    forks n-1 times for n commands (n-1 grandchildren), leaving the
+    child of this process to run the final command.
+   */
   if ( (pid = fork()) == 0) {
     RunPipeline(cmd.pgm, cmd, 0, -1);
-    exit(-1);
+    exit(EXIT_FAILURE);
   }
   else {
-
     /* We don't wait for backgrounded commands */
-    if (!cmd.bakground)
+    if (!cmd.bakground) {
       waitpid(pid, NULL, 0);
+    }
   }
-  return 0;
+  
+  return;
 }
 
 
@@ -127,22 +144,23 @@ StartPipeline(Command cmd)
  *   of actually running the pipeline.
  *
  * Arguments:
- *   p      --- The pipeline.
- *   cmdNum --- The number of the command starting from last = 0, penultimate = 1, …
- *
+ *   p         --- The pipeline.
+ *   cmd       --- Command including redirections and backgrounding.
+ *   cmdNum    --- Command number starting from last = 0, penultimate = 1, etc.
+ *   pipeWrite --- The end of the pipe to communicate with the next command.
  */
-int
+void
 RunPipeline(Pgm *p, Command cmd, int cmdNum, int pipeWrite)
 {
-  pid_t  pid;
-  char **program;
-  int    fd[2];
-  int    firstCmd;
-  int    lastCmd;
-  int    stdinRedirect;
-  int    stdinFile;
-  int    stdoutRedirect;
-  int    stdoutFile;
+  pid_t   pid;
+  char  **program;
+  int     fd[2];
+  int     firstCmd;
+  int     lastCmd;
+  int     stdinRedirect;
+  int     stdinFile;
+  int     stdoutRedirect;
+  int     stdoutFile;
 
   firstCmd       = p->next == NULL;
   lastCmd        = cmdNum  == 0;
@@ -155,145 +173,76 @@ RunPipeline(Pgm *p, Command cmd, int cmdNum, int pipeWrite)
   
   /* We don't create a new pipe for the first command. */
   if (!firstCmd) {
-    pipe(fd);
+    if (pipe(fd) < 0)
+      { perror("pipe"); exit(EXIT_FAILURE); }
     RunPipeline(p->next, cmd, cmdNum + 1, fd[1]);
   }
 
   /* Redirect standard input by replacing STDIN of first command with a file  */
   if (stdinRedirect) {
-    stdinFile = open(cmd.rstdin, O_RDONLY);
-    dup2(stdinFile, 0);
+    if ( (stdinFile = open(cmd.rstdin, O_RDONLY)) < 0)
+      { perror("open"); exit(EXIT_FAILURE); }
+    if (dup2(stdinFile, 0) < 0)
+      { perror("dup2"); exit(EXIT_FAILURE); }
   }
 
   /* Redirect standard output by replacing STDOUT of last command with a file  */
   if (stdoutRedirect) {
-    stdoutFile = open(cmd.rstdout, O_WRONLY|O_CREAT, 0666);
-    dup2(stdoutFile, 1);
+    if ( (stdoutFile = open(cmd.rstdout, O_WRONLY|O_CREAT, 0666)) < 0)
+      { perror("open"); exit(EXIT_FAILURE); }
+    if (dup2(stdoutFile, 1) < 0)
+      { perror("dup2"); exit(EXIT_FAILURE); }
   }
 
   /* Last command is not forked */
   if (lastCmd) {
     /* More than a single command! */
     if (!firstCmd) {
-      close(fd[1]);
-      dup2(fd[0],  0);
+      if (dup2(fd[0], 0) < 0)
+	{ perror("dup2"); exit(EXIT_FAILURE); }
     }
     
     execvp(program[0], program);
+    fprintf(stderr, "Failure running `%s'.\n", program[0]);
     exit(EXIT_FAILURE);
   }
 
   if ( (pid = fork()) == 0) {
     if (firstCmd) {
-      dup2(pipeWrite, 1);
+      if (dup2(pipeWrite, 1) < 0)
+	{ perror("dup2"); exit(EXIT_FAILURE); }
       execvp(program[0], program);
+      fprintf(stderr, "Failure running `%s'.\n", program[0]);
       exit(EXIT_FAILURE);
     }
     /* Middle commands (neither first nor last) */
     else {
       
-      close(fd[1]);
-      dup2(fd[0], 0);
-      dup2(pipeWrite, 1);
+      if (dup2(fd[0], 0) < 0)
+	{ perror("dup2"); exit(EXIT_FAILURE); }
+      if (dup2(pipeWrite, 1) < 0)
+	{ perror("dup2"); exit(EXIT_FAILURE); }
 
       execvp(program[0], program);
+      fprintf(stderr, "Failure running `%s'.\n", program[0]);
       exit(EXIT_FAILURE);
     }
   }
 
-  if (stdinRedirect)  { close(stdinFile);  }
-  if (stdoutRedirect) { close(stdoutFile); }
-  
-  close(pipeWrite);
-  
-  return 1;
-}
-
-/* void */
-/* RunPipeline(Pgm *p, int n, int pipefd[2]) */
-/* { */
-/*   if (p == NULL) { */
-/*     return; */
-/*   } */
-
-/*   pid_t pid; */
-
-/*   char **pl = p->pgmlist; */
-/*   RunPipeline(p->next, n + 1, NULL); */
-/*   printf("Running: %s\n", pl[0]); */
-
-/*   if ( (pid = fork()) < 0) { */
-/*     perror("fork"); */
-/*     exit(EXIT_FAILURE); */
-/*   } */
-
-/*   else if (pid == 0) {		/\* child *\/ */
-/*     execvp(pl[0], pl); */
-/*     perror("execlp"); */
-/*     exit(EXIT_FAILURE); */
-/*   } */
-
-/*   else {			/\* parent *\/ */
-/*     wait(NULL); */
-/*   } */
-
-/*   return; */
-/* } */
-
-int
-NumberOfCommands(Command cmd)
-{
-  int total = 0;
-  Pgm *inter;
-  for (inter = cmd.pgm;
-       inter != NULL;
-       inter = inter->next) 
-    total++;
-  return total;
-}
-
-/*
- * Name: PrintCommand
- *
- * Description: Prints a Command structure as returned by parse on stdout.
- *
- */
-void
-PrintCommand (int n, Command *cmd)
-{
-  printf("Parse returned %d:\n", n);
-  printf("   stdin : %s\n", cmd->rstdin  ? cmd->rstdin  : "<none>" );
-  printf("   stdout: %s\n", cmd->rstdout ? cmd->rstdout : "<none>" );
-  printf("   bg    : %s\n", cmd->bakground ? "yes" : "no");
-  PrintPgm(cmd->pgm);
-}
-
-/*
- * Name: PrintPgm
- *
- * Description: Prints a list of Pgm:s
- *
- */
-void
-PrintPgm (Pgm *p)
-{
-  if (p == NULL) {
-    return;
+  /* Clean up. */
+  if (stdinRedirect)  {
+    if (close(stdinFile) < 0) 
+      { perror("close"); exit(EXIT_FAILURE); }
   }
-  else {
-    char **pl = p->pgmlist;
-
-    /* The list is in reversed order so print
-     * it reversed to get right
-     */
-    PrintPgm(p->next);
-    printf("    [");
-    while (*pl) {
-      printf("%s ", *pl++);
-      putchar(',');
-    }
-    printf("]\n");
+  if (stdoutRedirect) {
+    if (close(stdoutFile) < 0) 
+      { perror("close"); exit(EXIT_FAILURE); }
   }
+  
+  if (close(pipeWrite) < 0)
+    { perror("close"), exit(EXIT_FAILURE); }
+  
+  return;
 }
 
 /*
